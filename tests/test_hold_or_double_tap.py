@@ -75,6 +75,40 @@ def _wait_idle() -> None:
     time.sleep(0.01)
 
 
+def _tray_indicator_class():
+    """Import TrayIndicator with a self-contained GI mock.
+
+    The full suite lets other test modules replace sys.modules["gi.repository"]
+    with spec-limited mocks; importing the tray lazily here must not depend on
+    whichever mock happens to be current at this point in the session.
+    """
+    import sys
+
+    old_gi = sys.modules.get("gi")
+    old_repository = sys.modules.get("gi.repository")
+    gi = MagicMock()
+    repository = MagicMock()
+    for name in (
+        "Gtk",
+        "GLib",
+        "GObject",
+        "Gdk",
+        "GdkPixbuf",
+        "Gio",
+        "AyatanaAppIndicatorGlib",
+    ):
+        setattr(repository, name, MagicMock())
+    sys.modules["gi"] = gi
+    sys.modules["gi.repository"] = repository
+    try:
+        from vocalinux.ui.tray_indicator import TrayIndicator
+
+        return TrayIndicator
+    finally:
+        sys.modules["gi"] = old_gi if old_gi is not None else gi
+        sys.modules["gi.repository"] = old_repository if old_repository is not None else repository
+
+
 @pytest.fixture
 def gestures():
     clock = FakeClock()
@@ -494,7 +528,7 @@ class TestTrayWiring:
         return fake
 
     def test_hold_or_double_tap_registers_hands_free_callbacks(self) -> None:
-        from vocalinux.ui.tray_indicator import TrayIndicator
+        TrayIndicator = _tray_indicator_class()
 
         fake = self._fake("hold_or_double_tap")
         TrayIndicator._setup_keyboard_shortcuts(fake)
@@ -508,7 +542,7 @@ class TestTrayWiring:
         fake.shortcut_manager.start.assert_called_once()
 
     def test_external_activation_warns_for_gesture_mode(self, caplog) -> None:
-        from vocalinux.ui.tray_indicator import TrayIndicator
+        TrayIndicator = _tray_indicator_class()
 
         fake = self._fake("hold_or_double_tap")
         fake._external_activation_active.return_value = True
@@ -517,7 +551,7 @@ class TestTrayWiring:
         assert "hold_or_double_tap needs the internal key listener" in caplog.text
 
     def test_idle_state_resyncs_main_and_language_gestures(self) -> None:
-        from vocalinux.ui.tray_indicator import TrayIndicator
+        TrayIndicator = _tray_indicator_class()
 
         fake = MagicMock()
         fake._language_shortcut_managers = [MagicMock(), MagicMock()]
@@ -528,7 +562,7 @@ class TestTrayWiring:
             manager.notify_recognition_stopped.assert_called_once()
 
     def test_latch_calls_the_engine_method(self) -> None:
-        from vocalinux.ui.tray_indicator import TrayIndicator
+        TrayIndicator = _tray_indicator_class()
 
         fake = MagicMock()
         fake.speech_engine.enable_hands_free.return_value = True
