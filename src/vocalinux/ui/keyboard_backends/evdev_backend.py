@@ -1874,6 +1874,9 @@ class EvdevKeyboardBackend(KeyboardBackend):
         # Ends an active push-to-talk hold (fires the release callback); no-op
         # for toggle mode or when no hold is active.
         self._combo_released()
+        # A dropped event can have eaten a release: reset the gesture machine
+        # too, ending a live hold rather than leaving it latched on.
+        self._reset_gesture(stop_session=True)
 
     def _has_fd_state(self, fd: int) -> bool:
         """True if this engine still tracks shortcut state for a device fd."""
@@ -1896,6 +1899,9 @@ class EvdevKeyboardBackend(KeyboardBackend):
     def _drop_device_state(self, fd: int, device: InputDevice) -> None:
         """Forget shortcut bookkeeping tied to a removed device's fd."""
         self.key_pressed_devices.discard(id(device))
+        # A disconnect can swallow a release mid-hold. Reset the gesture
+        # machine and stop dictation rather than recording until the next key.
+        self._reset_gesture(stop_session=True)
         self._withheld_modifier.pop(fd, None)
         # The fd can be recycled for a newly plugged device; a stale
         # swallowed press would then eat that device's first release.
@@ -1908,6 +1914,7 @@ class EvdevKeyboardBackend(KeyboardBackend):
         """Forget every fd-scoped shortcut pairing (shared layer teardown)."""
         self._withheld_modifier = {}
         self._combo_swallowed = set()
+        self._reset_gesture(stop_session=True)
 
     def is_available(self) -> bool:
         """Check if evdev can access a keyboard device that supports this shortcut."""
@@ -2018,6 +2025,8 @@ class EvdevKeyboardBackend(KeyboardBackend):
 
         logger.info("Stopping evdev keyboard listener")
         self.active = False
+        # A listener stopped mid-hold must not leave the microphone open.
+        self._reset_gesture(stop_session=True)
         self._hub.unregister(self)
 
     def _monitor_devices(self) -> None:
@@ -2189,7 +2198,9 @@ class EvdevKeyboardBackend(KeyboardBackend):
                 logger.debug(f"Combo {self._shortcut} toggled (evdev)")
                 self.last_trigger_time = current_time
                 threading.Thread(target=self.double_tap_callback, daemon=True).start()
-        elif self._mode == "push_to_talk":
+        elif self._mode in ("push_to_talk", "hold_or_double_tap"):
+            # Combos cannot see a single modifier's press/release gesture, so
+            # hold_or_double_tap keeps push-to-talk semantics here.
             if not self._combo_active and self.key_press_callback is not None:
                 self._combo_active = True
                 logger.debug(f"Combo {self._shortcut} pressed (evdev)")
@@ -2197,7 +2208,7 @@ class EvdevKeyboardBackend(KeyboardBackend):
 
     def _combo_released(self) -> None:
         """Fire the release callback when a live push-to-talk combo ends."""
-        if self._mode == "push_to_talk" and self._combo_active:
+        if self._mode in ("push_to_talk", "hold_or_double_tap") and self._combo_active:
             self._combo_active = False
             if self.key_release_callback is not None:
                 logger.debug(f"Combo {self._shortcut} released (evdev)")
@@ -2214,6 +2225,17 @@ class EvdevKeyboardBackend(KeyboardBackend):
             # Check if this is our target modifier key
             if code in target_codes:
                 device_id = id(device)
+                # Hold-or-double-tap uses its own backend-independent detector.
+                # (device, code) identifies the physical key so auto-repeat and
+                # the same modifier on two keyboards never look like a tap.
+                if self.hold_or_double_tap_active:
+                    if value == 1:
+                        self.key_pressed_devices.add(device_id)
+                        self._handle_gesture_press((device_id, code))
+                    elif value == 0:
+                        self.key_pressed_devices.discard(device_id)
+                        self._handle_gesture_release((device_id, code))
+                    return
 
                 if value == 1:  # Key press
                     self.key_pressed_devices.add(device_id)
