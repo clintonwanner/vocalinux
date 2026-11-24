@@ -334,14 +334,14 @@ class PynputKeyboardBackend(KeyboardBackend):
                     ):
                         logger.debug(f"Combo {self._shortcut} toggled (pynput)")
                         self.last_trigger_time = current_time
-                        threading.Thread(target=self.double_tap_callback, daemon=True).start()
+                        self._spawn_callback(self.double_tap_callback)
                 elif self._mode in ("push_to_talk", "hold_or_double_tap"):
                     # A combo has no single-modifier press/release gesture;
                     # hold_or_double_tap keeps push-to-talk semantics here.
                     if not self._combo_active and self.key_press_callback is not None:
                         self._combo_active = True
                         logger.debug(f"Combo {self._shortcut} pressed (pynput)")
-                        threading.Thread(target=self.key_press_callback, daemon=True).start()
+                        self._spawn_callback(self.key_press_callback)
         except Exception as e:
             logger.error(f"Error in pynput combo press handling: {e}")
 
@@ -360,7 +360,7 @@ class PynputKeyboardBackend(KeyboardBackend):
                     self._combo_active = False
                     if self.key_release_callback is not None:
                         logger.debug(f"Combo {self._shortcut} released (pynput)")
-                        threading.Thread(target=self.key_release_callback, daemon=True).start()
+                        self._spawn_callback(self.key_release_callback)
         except Exception as e:
             logger.error(f"Error in pynput combo release handling: {e}")
 
@@ -387,11 +387,11 @@ class PynputKeyboardBackend(KeyboardBackend):
                     ):
                         logger.debug(f"Double-tap {self._modifier_key} detected (pynput)")
                         self.last_trigger_time = current_time
-                        threading.Thread(target=self.double_tap_callback, daemon=True).start()
+                        self._spawn_callback(self.double_tap_callback)
                 elif self._mode == "push_to_talk":
                     if self.key_press_callback is not None:
                         logger.debug(f"Key press {self._modifier_key} detected (pynput)")
-                        threading.Thread(target=self.key_press_callback, daemon=True).start()
+                        self._spawn_callback(self.key_press_callback)
 
                 self.last_key_press_time = current_time
         except Exception as e:
@@ -416,7 +416,7 @@ class PynputKeyboardBackend(KeyboardBackend):
             if self._mode == "push_to_talk" and matched:
                 if self.key_release_callback is not None:
                     logger.debug(f"Key release {self._modifier_key} detected (pynput)")
-                    threading.Thread(target=self.key_release_callback, daemon=True).start()
+                    self._spawn_callback(self.key_release_callback)
 
         except Exception as e:
             logger.error(f"Error in pynput key release handling: {e}")

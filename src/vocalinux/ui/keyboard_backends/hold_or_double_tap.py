@@ -26,6 +26,8 @@ import time
 from collections import deque
 from typing import Callable, Deque, Optional, Protocol
 
+from ...utils import watchdog
+
 logger = logging.getLogger(__name__)
 
 #: A press shorter than this is a tap (seconds).
@@ -313,10 +315,16 @@ class _SerialDispatcher:
                 if not self._queue:
                     return
                 callback = self._queue.popleft()
+            # Tell the systemd watchdog feed that a callback is running: one
+            # that never returns stops WATCHDOG=1 after 30s, unless the tray
+            # marked known-slow engine work with watchdog.long_operation().
+            watchdog.callback_started()
             try:
                 callback()
             except Exception:
                 logger.exception("Error in hold/double-tap callback")
+            finally:
+                watchdog.callback_finished()
 
 
 def _start_thread_timer(delay: float, callback: Callback) -> TimerHandle:

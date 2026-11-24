@@ -13,6 +13,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Dict, Optional
 
+from .utils import watchdog
 from .utils.host_process import running_from_appimage
 from .utils.vosk_model_info import SUPPORTED_LANGUAGES
 from .version import __version__
@@ -355,6 +356,11 @@ def main():
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
         logger.debug("Debug logging enabled")
+
+    # Answer systemd's watchdog from the very start. A cold speech-model load
+    # later in startup can take longer than WatchdogSec; pings then continue
+    # from the hotkey monitor and stop if it wedges.
+    watchdog.start_from_environment()
 
     # External activation: forward the command to a running instance over D-Bus
     # and exit without acquiring the lock or starting a second full instance.

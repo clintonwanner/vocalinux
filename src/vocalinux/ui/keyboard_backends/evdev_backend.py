@@ -48,6 +48,7 @@ except ImportError:
     ecodes = None  # type: ignore
     EVDEV_AVAILABLE = False
 
+from ...utils import watchdog as systemd_watchdog
 from .base import (
     DEFAULT_SHORTCUT,
     DEFAULT_SHORTCUT_MODE,
@@ -924,6 +925,10 @@ class EvdevDeviceHub:
 
         if monitor is not None:
             monitor.join(timeout=2.0)
+            # An intentional listener shutdown restores the no-monitor
+            # fallback feed; a crash exits without this call, so its last
+            # beat goes stale and systemd restarts the process.
+            systemd_watchdog.note_monitor_stopped()
         if watchdog is not None:
             watchdog.join(timeout=_FORWARDING_WATCHDOG_POLL_SECONDS + 0.5)
 
@@ -1065,6 +1070,11 @@ class EvdevDeviceHub:
                     # stale while grabs are held means this loop wedged
                     # mid-iteration — the watchdog then releases every grab.
                     self._monitor_heartbeat = now
+                    # And the systemd watchdog feed: a monitor that stops
+                    # looping stops pinging, so the service is restarted.
+                    # This runs before any callback work and with no devices
+                    # too, so a slow model load cannot starve it.
+                    systemd_watchdog.note_monitor_beat()
                     if self._grab_suspended_devices:
                         # Watchdog-released devices are retired and re-opened
                         # HERE, on the monitor thread: closing an fd from the
@@ -2197,14 +2207,14 @@ class EvdevKeyboardBackend(KeyboardBackend):
             if self.double_tap_callback is not None and current_time - self.last_trigger_time > 0.5:
                 logger.debug(f"Combo {self._shortcut} toggled (evdev)")
                 self.last_trigger_time = current_time
-                threading.Thread(target=self.double_tap_callback, daemon=True).start()
+                self._spawn_callback(self.double_tap_callback)
         elif self._mode in ("push_to_talk", "hold_or_double_tap"):
             # Combos cannot see a single modifier's press/release gesture, so
             # hold_or_double_tap keeps push-to-talk semantics here.
             if not self._combo_active and self.key_press_callback is not None:
                 self._combo_active = True
                 logger.debug(f"Combo {self._shortcut} pressed (evdev)")
-                threading.Thread(target=self.key_press_callback, daemon=True).start()
+                self._spawn_callback(self.key_press_callback)
 
     def _combo_released(self) -> None:
         """Fire the release callback when a live push-to-talk combo ends."""
@@ -2212,7 +2222,7 @@ class EvdevKeyboardBackend(KeyboardBackend):
             self._combo_active = False
             if self.key_release_callback is not None:
                 logger.debug(f"Combo {self._shortcut} released (evdev)")
-                threading.Thread(target=self.key_release_callback, daemon=True).start()
+                self._spawn_callback(self.key_release_callback)
 
     def _handle_modifier_key_event(self, event: InputEvent, device: InputDevice) -> None:
         """Handle a key event for a single-modifier gesture (double-tap / hold)."""
@@ -2250,12 +2260,12 @@ class EvdevKeyboardBackend(KeyboardBackend):
                         ):
                             logger.debug(f"Double-tap {self._modifier_key} detected (evdev)")
                             self.last_trigger_time = current_time
-                            threading.Thread(target=self.double_tap_callback, daemon=True).start()
+                            self._spawn_callback(self.double_tap_callback)
                     elif self._mode == "push_to_talk":
                         # Trigger on press
                         if self.key_press_callback is not None:
                             logger.debug(f"Key press {self._modifier_key} detected (evdev)")
-                            threading.Thread(target=self.key_press_callback, daemon=True).start()
+                            self._spawn_callback(self.key_press_callback)
 
                     self.last_key_press_time = current_time
 
@@ -2266,7 +2276,7 @@ class EvdevKeyboardBackend(KeyboardBackend):
                         # Trigger on release
                         if self.key_release_callback is not None:
                             logger.debug(f"Key release {self._modifier_key} detected (evdev)")
-                            threading.Thread(target=self.key_release_callback, daemon=True).start()
+                            self._spawn_callback(self.key_release_callback)
 
         except Exception as e:
             logger.error(f"Error handling key event: {e}")

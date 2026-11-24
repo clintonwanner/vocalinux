@@ -66,6 +66,7 @@ from ..speech_recognition.diarization import (
     transcribe_audio_file,
 )
 from ..suspend_handler import SuspendHandler
+from ..utils import watchdog
 from ..utils.resource_manager import ResourceManager
 from ..utils.update_checker import DEFAULT_CHECK_AUTOMATICALLY, ReleaseInfo
 from ..utils.update_monitor import UpdateMonitor
@@ -780,7 +781,9 @@ class TrayIndicator:
         """Toggle the recognition state between IDLE and LISTENING."""
         if self._cancel_if_transcribing():
             return
-        with self._ptt_lock:
+        # Engine work can legitimately block (cold model load, bounded joins);
+        # mark it so the systemd watchdog does not treat it as a stuck hotkey.
+        with watchdog.long_operation("toggle recognition"), self._ptt_lock:
             self._ptt_owner = None
             if self.speech_engine.state == RecognitionState.IDLE:
                 self.speech_engine.start_recognition()
@@ -803,7 +806,9 @@ class TrayIndicator:
         keeps the running capture and releases any text it was holding for the
         key release, so nothing spoken before the latch is lost.
         """
-        if not self.speech_engine.enable_hands_free():
+        with watchdog.long_operation("hands-free latch"):
+            latched = self.speech_engine.enable_hands_free()
+        if not latched:
             logger.debug("Hands-free latch ignored: no recording session is live")
             return
         logger.info("Hands-free dictation latched (double-tap again to stop)")
@@ -816,7 +821,10 @@ class TrayIndicator:
         if not callable(is_transcribing) or is_transcribing() is not True:
             return False
         cancel = getattr(self.speech_engine, "cancel_transcription", None)
-        return callable(cancel) and cancel() is True
+        if not callable(cancel):
+            return False
+        with watchdog.long_operation("cancel transcription"):
+            return cancel() is True
 
     def _push_to_talk_press(
         self, manager: Optional[KeyboardShortcutManager], start: Callable[[], bool]
@@ -829,13 +837,13 @@ class TrayIndicator:
         the whole start makes the release wait instead: it then finds the
         owner and ends the session normally.
         """
-        with self._ptt_lock:
+        with watchdog.long_operation("push-to-talk start"), self._ptt_lock:
             if self.speech_engine.state == RecognitionState.IDLE and start():
                 self._ptt_owner = manager
 
     def _push_to_talk_release(self, manager: KeyboardShortcutManager) -> None:
         """Push-to-talk release: end the session only when this binding owns it."""
-        with self._ptt_lock:
+        with watchdog.long_operation("push-to-talk stop"), self._ptt_lock:
             if self._ptt_owner is manager:
                 self._stop_recognition()
 
@@ -860,7 +868,7 @@ class TrayIndicator:
         """
         if self._cancel_if_transcribing():
             return
-        with self._ptt_lock:
+        with watchdog.long_operation("language toggle"), self._ptt_lock:
             self._ptt_owner = None
             if self.speech_engine.state == RecognitionState.IDLE:
                 self.speech_engine.start_recognition_with_language(language)
@@ -901,7 +909,7 @@ class TrayIndicator:
 
     def _stop_recognition(self) -> None:
         """Stop voice recognition (for push-to-talk mode)."""
-        with self._ptt_lock:
+        with watchdog.long_operation("stop recognition"), self._ptt_lock:
             self._ptt_owner = None
             if self.speech_engine.state != RecognitionState.IDLE:
                 self.speech_engine.stop_recognition()

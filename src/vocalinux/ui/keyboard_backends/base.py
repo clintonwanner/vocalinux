@@ -7,10 +7,12 @@ the required methods.
 
 import logging
 import re
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple, cast
 
+from ...utils import watchdog
 from .hold_or_double_tap import HoldOrDoubleTapDetector
 
 logger = logging.getLogger(__name__)
@@ -599,6 +601,27 @@ class KeyboardBackend(ABC):
     def hold_or_double_tap_active(self) -> bool:
         """True when this backend should drive the gesture state machine."""
         return self._mode == "hold_or_double_tap" and not self._spec.is_combo
+
+    def _spawn_callback(self, callback: Callback) -> None:
+        """Run a hotkey callback on its own thread, tracked by the watchdog.
+
+        Press and release handlers block on the speech engine (a cold model
+        load can take far longer than the watchdog interval), so they must
+        stay off the input loop. The watchdog sees each callback start and
+        finish; tray callbacks mark known-slow engine work with
+        watchdog.long_operation().
+        """
+
+        def run() -> None:
+            watchdog.callback_started()
+            try:
+                callback()
+            except Exception:
+                logger.exception("Hotkey callback raised")
+            finally:
+                watchdog.callback_finished()
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _log_gesture_fallback_once(self) -> None:
         """Explain why a combo shortcut keeps push-to-talk semantics."""
