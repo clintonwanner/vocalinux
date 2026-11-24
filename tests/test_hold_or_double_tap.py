@@ -71,6 +71,19 @@ def _wait_for(events: list[str], count: int, timeout: float = 2.0) -> None:
     assert len(events) >= count, f"expected {count} callbacks, got {events}"
 
 
+def _wait_until(condition, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.002)
+    assert condition()
+
+
+def _drain(detector) -> None:
+    done = threading.Event()
+    detector._dispatcher.submit(done.set)
+    assert done.wait(2.0)
+
+
 def _wait_idle() -> None:
     time.sleep(0.01)
 
@@ -84,6 +97,10 @@ def _tray_indicator_class():
     """
     import sys
 
+    module_name = "vocalinux.ui.tray_indicator"
+    if module_name in sys.modules:
+        return sys.modules[module_name].TrayIndicator
+    before = set(sys.modules)
     old_gi = sys.modules.get("gi")
     old_repository = sys.modules.get("gi.repository")
     gi = MagicMock()
@@ -105,8 +122,18 @@ def _tray_indicator_class():
 
         return TrayIndicator
     finally:
-        sys.modules["gi"] = old_gi if old_gi is not None else gi
-        sys.modules["gi.repository"] = old_repository if old_repository is not None else repository
+        # Leave no module bound to this mock for later test modules.
+        for name in set(sys.modules) - before:
+            if name.startswith("vocalinux."):
+                module = sys.modules.pop(name)
+                parent = sys.modules.get(name.rpartition(".")[0])
+                if getattr(parent, name.rpartition(".")[2], None) is module:
+                    delattr(parent, name.rpartition(".")[2])
+        for name, old in (("gi", old_gi), ("gi.repository", old_repository)):
+            if old is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = old
 
 
 @pytest.fixture
@@ -276,7 +303,7 @@ class TestGestureDetector:
         _wait_for(gestures.events, 2)
         assert gestures.detector.latched is True
         gestures.detector.resync()
-        assert gestures.detector.latched is False
+        _wait_until(lambda: not gestures.detector.latched)
         gestures.clock.now = 1.0
         gestures.detector.press("a")
         gestures.clock.now = 1.4
@@ -288,6 +315,74 @@ class TestGestureDetector:
             "hold_start",
             "hold_end",
         ]
+
+    def test_late_idle_does_not_drop_the_next_hold(self, gestures) -> None:
+        """Stop reports IDLE while a new press is already queued."""
+        entered, unblock, events = threading.Event(), threading.Event(), []
+        detector = gestures.detector
+
+        def slow_stop() -> None:
+            entered.set()
+            assert unblock.wait(2.0)
+            events.append("stop")
+            detector.resync(lambda: events[-1] == "start")
+
+        detector._on_hold_start = lambda: events.append("start")
+        detector._on_hold_end = slow_stop
+        detector.press("a")
+        gestures.clock.now = 1.0
+        detector.release("a")
+        assert entered.wait(2.0)
+        detector.press("a")
+        unblock.set()
+        _wait_for(events, 3)
+        _drain(detector)
+        _drain(detector)
+        gestures.clock.now = 2.0
+        detector.release("a")
+        _wait_for(events, 4)
+        assert events == ["start", "stop", "start", "stop"]
+
+    def test_stale_idle_cannot_orphan_a_live_recording(self, gestures) -> None:
+        detector = gestures.detector
+        detector.press("a")
+        _wait_for(gestures.events, 1)
+        detector.resync(lambda: True)
+        _drain(detector)
+        gestures.clock.now = 1.0
+        detector.release("a")
+        _wait_for(gestures.events, 2)
+        assert gestures.events == ["hold_start", "hold_end"]
+
+    def test_resync_while_key_down_ignores_auto_repeat_and_release(self, gestures) -> None:
+        detector = gestures.detector
+        detector.press("a")
+        detector.resync()
+        _drain(detector)
+        detector.press("a")
+        detector.release("a")
+        _drain(detector)
+        assert gestures.events == ["hold_start"]
+        detector.press("a")
+        _wait_for(gestures.events, 2)
+
+    def test_reset_never_drops_a_queued_stop(self, gestures) -> None:
+        detector = gestures.detector
+        block, entered = threading.Event(), threading.Event()
+
+        def start() -> None:
+            entered.set()
+            assert block.wait(2.0)
+
+        detector._on_hold_start = start
+        detector.press("a")
+        assert entered.wait(2.0)
+        gestures.clock.now = 1.0
+        detector.release("a")
+        detector.reset(stop_session=True)
+        block.set()
+        _drain(detector)
+        assert gestures.events == ["hold_end"]
 
     def test_reset_stops_a_live_session(self, gestures) -> None:
         gestures.detector.press("a")
@@ -346,6 +441,33 @@ class TestBackendWiring:
         backend._gesture = MagicMock()
         backend._handle_key_event(_evdev_event(ecodes.KEY_A, 1), MagicMock())
         backend._gesture.press.assert_not_called()
+
+    def test_other_keyboard_disconnect_keeps_hold_own_disconnect_ends_it(self) -> None:
+        backend = evdev_backend.EvdevKeyboardBackend(
+            shortcut="right_alt+right_alt", mode="hold_or_double_tap"
+        )
+        stopped = threading.Event()
+        backend.register_press_callback(lambda: None)
+        backend.register_release_callback(stopped.set)
+        code = next(iter(backend._get_target_key_codes()))
+        mine, other = MagicMock(), MagicMock()
+        backend._handle_modifier_key_event(_evdev_event(code, 1), mine)
+        backend._drop_device_state(8, other)
+        assert backend._gesture.held_sources()
+        assert not stopped.wait(0.05)
+        backend._drop_device_state(7, mine)
+        assert not backend._gesture.held_sources()
+        assert stopped.wait(2.0)
+
+    def test_queued_stop_survives_callbacks_being_cleared(self) -> None:
+        backend = evdev_backend.EvdevKeyboardBackend(
+            shortcut="right_alt+right_alt", mode="hold_or_double_tap"
+        )
+        stopped = MagicMock()
+        backend.register_release_callback(stopped)
+        backend.register_release_callback(None)
+        backend._gesture_hold_end()
+        stopped.assert_called_once()
 
     def test_evdev_combo_falls_back_to_push_to_talk(self) -> None:
         backend = evdev_backend.EvdevKeyboardBackend(shortcut="alt+r", mode="hold_or_double_tap")
@@ -556,6 +678,7 @@ class TestTrayWiring:
         fake = MagicMock()
         fake._language_shortcut_managers = [MagicMock(), MagicMock()]
         fake._model_keepalive = None
+        fake._resync_gestures = lambda: TrayIndicator._resync_gestures(fake)
         TrayIndicator._on_recognition_state_changed(fake, RecognitionState.IDLE)
         fake.shortcut_manager.notify_recognition_stopped.assert_called_once()
         for manager in fake._language_shortcut_managers:

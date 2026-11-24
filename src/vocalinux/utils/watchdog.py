@@ -18,7 +18,8 @@ Liveness rules:
   keeps pinging so a service with C{TimeoutStartSec} is not restarted
   before the listener can exist.
 * A hotkey callback stuck for more than C{CALLBACK_STALL_SECONDS} stops
-  pings, unless it is inside an explicit C{long_operation()} block. Cold
+  pings. Inside an explicit C{long_operation()} block the limit is
+  C{LONG_OPERATION_STALL_SECONDS}. Cold
   model loads and transcription make a started session legitimately slow,
   so the tray wraps those engine calls in that block; the detector still
   catches a wedged gesture/callback worker that never returns.
@@ -44,6 +45,9 @@ PING_INTERVAL_SECONDS = 5.0
 
 #: A callback running longer than this stops the watchdog feed.
 CALLBACK_STALL_SECONDS = 30.0
+
+#: Even known-slow engine work must finish eventually, or the hotkey is dead.
+LONG_OPERATION_STALL_SECONDS = 180.0
 
 #: A monitor whose last beat is older than this is considered wedged.
 MONITOR_STALE_SECONDS = 30.0
@@ -205,8 +209,13 @@ class WatchdogPinger:
             return False
         now = self._clock() if now is None else now
         with self._lock:
-            if self._long_operations == 0 and self._callback_since is not None:
-                if now - self._callback_since > CALLBACK_STALL_SECONDS:
+            if self._callback_since is not None:
+                limit = (
+                    LONG_OPERATION_STALL_SECONDS
+                    if self._long_operations
+                    else CALLBACK_STALL_SECONDS
+                )
+                if now - self._callback_since > limit:
                     return False
             if self._last_beat is not None and now - self._last_beat > MONITOR_STALE_SECONDS:
                 return False

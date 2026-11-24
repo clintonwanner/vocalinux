@@ -500,6 +500,9 @@ class KeyboardBackend(ABC):
         self.hands_free_start_callback: Optional[Callback] = None
         self.hands_free_stop_callback: Optional[Callback] = None
         self._gesture: Optional[HoldOrDoubleTapDetector] = None
+        # Last real release callback. A listener restart clears and re-registers
+        # callbacks while a queued stop may still be waiting to run.
+        self._gesture_stop_callback: Optional[Callback] = None
         self._gesture_fallback_logged = False
 
     def set_pass_shortcut_to_apps(self, enabled: bool) -> None:
@@ -652,7 +655,7 @@ class KeyboardBackend(ABC):
             callback()
 
     def _gesture_hold_end(self) -> None:
-        callback = self.key_release_callback
+        callback = self.key_release_callback or self._gesture_stop_callback
         if callback is not None:
             logger.debug("Hold-to-talk release (%s)", self._shortcut)
             callback()
@@ -666,7 +669,11 @@ class KeyboardBackend(ABC):
         callback()
 
     def _gesture_hands_free_end(self) -> None:
-        callback = self.hands_free_stop_callback or self.key_release_callback
+        callback = (
+            self.hands_free_stop_callback
+            or self.key_release_callback
+            or self._gesture_stop_callback
+        )
         if callback is None:
             logger.warning("No hands-free stop callback registered")
             return
@@ -692,7 +699,7 @@ class KeyboardBackend(ABC):
         if self._gesture is not None:
             self._gesture.reset(stop_session=stop_session)
 
-    def notify_recognition_stopped(self) -> None:
+    def notify_recognition_stopped(self, is_recording: Callable[[], bool] = lambda: False) -> None:
         """Resync after recording stopped outside the shortcut.
 
         The tray calls this on IDLE/ERROR transitions. A latched or mid-tap
@@ -700,7 +707,7 @@ class KeyboardBackend(ABC):
         press would be read as the second half of the old gesture.
         """
         if self._gesture is not None:
-            self._gesture.resync()
+            self._gesture.resync(is_recording)
 
     def register_hands_free_callbacks(
         self,
@@ -737,3 +744,5 @@ class KeyboardBackend(ABC):
             callback: Function to call when the shortcut key is released
         """
         self.key_release_callback = callback
+        if callback is not None:
+            self._gesture_stop_callback = callback

@@ -1024,6 +1024,7 @@ class EvdevDeviceHub:
                     # engine's combo logically held.
                     for engine in engines:
                         engine._reset_combo_state()
+                        engine._resync_gesture_keys(device)
                 self._forward_event(fd, event, generation)
             return
         if fd in self._dropped_devices:
@@ -1884,9 +1885,6 @@ class EvdevKeyboardBackend(KeyboardBackend):
         # Ends an active push-to-talk hold (fires the release callback); no-op
         # for toggle mode or when no hold is active.
         self._combo_released()
-        # A dropped event can have eaten a release: reset the gesture machine
-        # too, ending a live hold rather than leaving it latched on.
-        self._reset_gesture(stop_session=True)
 
     def _has_fd_state(self, fd: int) -> bool:
         """True if this engine still tracks shortcut state for a device fd."""
@@ -1906,12 +1904,31 @@ class EvdevKeyboardBackend(KeyboardBackend):
             # press of that key would be consumed too, eating a keystroke.
             self._combo_swallowed.discard(fd)
 
+    def _release_lost_gesture_keys(self, device: InputDevice, held: set[int]) -> None:
+        """Deliver gesture releases for this device's keys that are not held."""
+        if self._gesture is None:
+            return
+        for source in self._gesture.held_sources():
+            device_id, code = cast("tuple[int, int]", source)
+            if device_id == id(device) and code not in held:
+                self._gesture.release(source)
+
+    def _resync_gesture_keys(self, device: InputDevice) -> None:
+        """Recover from a release lost to SYN_DROPPED."""
+        if self._gesture is None or not self._gesture.held_sources():
+            return
+        try:
+            held = set(device.active_keys())
+        except (OSError, IOError):
+            held = set()
+        self._release_lost_gesture_keys(device, held)
+
     def _drop_device_state(self, fd: int, device: InputDevice) -> None:
         """Forget shortcut bookkeeping tied to a removed device's fd."""
         self.key_pressed_devices.discard(id(device))
-        # A disconnect can swallow a release mid-hold. Reset the gesture
-        # machine and stop dictation rather than recording until the next key.
-        self._reset_gesture(stop_session=True)
+        # A disconnect can swallow a release mid-hold. Only this device's keys
+        # count: unplugging another keyboard must not end a hands-free session.
+        self._release_lost_gesture_keys(device, set())
         self._withheld_modifier.pop(fd, None)
         # The fd can be recycled for a newly plugged device; a stale
         # swallowed press would then eat that device's first release.

@@ -799,6 +799,17 @@ class TrayIndicator:
             lambda: self.speech_engine.start_recognition(mode="push_to_talk"),
         )
 
+    def _is_recording(self) -> bool:
+        return self.speech_engine.state == RecognitionState.LISTENING
+
+    def _resync_gestures(self) -> None:
+        """Let every hotkey drop a gesture whose session is over."""
+        manager = getattr(self, "shortcut_manager", None)
+        if manager is not None:
+            manager.notify_recognition_stopped(self._is_recording)
+        for language_manager in getattr(self, "_language_shortcut_managers", ()):
+            language_manager.notify_recognition_stopped(self._is_recording)
+
     def _latch_hands_free(self) -> None:
         """Switch the live dictation session to hands-free (pause-driven).
 
@@ -810,6 +821,8 @@ class TrayIndicator:
             latched = self.speech_engine.enable_hands_free()
         if not latched:
             logger.debug("Hands-free latch ignored: no recording session is live")
+            # The start was refused; do not leave the hotkey latched.
+            self._resync_gestures()
             return
         logger.info("Hands-free dictation latched (double-tap again to stop)")
 
@@ -949,11 +962,7 @@ class TrayIndicator:
         # command). A latched or mid-tap gesture belongs to the session that
         # just ended; resync so the next press starts a normal one.
         if state in (RecognitionState.IDLE, RecognitionState.ERROR):
-            manager = getattr(self, "shortcut_manager", None)
-            if manager is not None:
-                manager.notify_recognition_stopped()
-            for language_manager in getattr(self, "_language_shortcut_managers", ()):
-                language_manager.notify_recognition_stopped()
+            self._resync_gestures()
 
         keepalive = getattr(self, "_model_keepalive", None)
         if keepalive is not None:

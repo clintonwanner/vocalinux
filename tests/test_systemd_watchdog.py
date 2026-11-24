@@ -106,6 +106,8 @@ class TestWatchdogHealth:
         clock.now += watchdog.CALLBACK_STALL_SECONDS + 30
         with pinger.long_operation("cold model load"):
             assert pinger.ping_if_due() is True
+            clock.now += watchdog.LONG_OPERATION_STALL_SECONDS
+            assert pinger.ping_if_due() is False
         clock.now += 6.0
         # Back in ordinary callback work: now the stall rule applies again.
         assert pinger.ping_if_due() is False

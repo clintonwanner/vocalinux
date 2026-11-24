@@ -94,6 +94,7 @@ class HoldOrDoubleTapDetector:
         self._timer: Optional[TimerHandle] = None
         self._timer_token = 0
         self._generation = 0
+        self._pending = 0
 
     # -- public surface -----------------------------------------------------
 
@@ -187,19 +188,34 @@ class HoldOrDoubleTapDetector:
                     # latched.
                     self._state = self._LATCHED
 
-    def resync(self) -> None:
-        """Forget any in-flight gesture because the session ended elsewhere.
+    def held_sources(self) -> set[object]:
+        """Return the sources currently holding the shortcut key."""
+        with self._lock:
+            return set(self._down)
+
+    def resync(self, is_recording: Callable[[], bool] = lambda: False) -> None:
+        """Forget the gesture if its session ended elsewhere.
 
         Called when recognition stops through the tray, an error, a voice
-        command, or silence handling. The next press then starts a normal
-        session instead of being treated as part of the old gesture.
+        command, or an ordinary release. The notification can arrive late, when
+        a newer press has already queued or started the next session, so the
+        check runs on the callback worker, behind every queued start and stop.
+        It does nothing if another action is queued or a session is recording.
         """
+        self._dispatcher.submit(lambda: self._resync_if_ended(is_recording))
+
+    def _resync_if_ended(self, is_recording: Callable[[], bool]) -> None:
+        recording = is_recording()
         with self._lock:
-            if self._state == self._IDLE and not self._down:
+            if recording or self._pending or self._state == self._IDLE:
                 return
-            self._generation += 1
             self._cancel_timer()
-            self._reset_locked()
+            # The key may still be down: remember it, so auto-repeat cannot
+            # start a session, and ignore its eventual release.
+            self._state = self._IDLE
+            self._multi_press = False
+            self._session_live = False
+            self._suppress_release = bool(self._down)
             logger.debug("Hold/double-tap gesture state resynced after external stop")
 
     def reset(self, *, stop_session: bool = False) -> None:
@@ -265,11 +281,19 @@ class HoldOrDoubleTapDetector:
                 self._state = self._LATCHED
 
     def _dispatch(self, callback: Callback, label: str) -> None:
-        """Queue a callback on the serialized worker, tagged for staleness."""
+        """Queue a callback on the serialized worker, tagged for staleness.
+
+        Stops are never dropped: a reset racing a release must not discard
+        the only thing that will close the microphone.
+        """
         generation = self._generation
+        is_stop = callback in (self._on_hold_end, self._on_hands_free_end)
+        self._pending += 1
 
         def run() -> None:
-            if generation != self._generation:
+            with self._lock:
+                self._pending -= 1
+            if not is_stop and generation != self._generation:
                 logger.debug("Dropping stale hold/double-tap callback: %s", label)
                 return
             callback()

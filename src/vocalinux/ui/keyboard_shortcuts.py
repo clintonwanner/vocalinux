@@ -146,10 +146,10 @@ class KeyboardShortcutManager:
         """Get the mode-specific human-readable name for the shortcut."""
         return get_shortcut_display_name(self._shortcut, self._mode)
 
-    def notify_recognition_stopped(self) -> None:
+    def notify_recognition_stopped(self, is_recording: Callable[[], bool] = lambda: False) -> None:
         """Resync gesture state after recording stopped outside the shortcut."""
         if self.backend_instance is not None:
-            self.backend_instance.notify_recognition_stopped()
+            self.backend_instance.notify_recognition_stopped(is_recording)
 
     def set_mode(self, mode: str) -> bool:
         """
