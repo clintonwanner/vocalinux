@@ -2827,6 +2827,32 @@ class TextInjector:
             "(paste/typing may be affected)"
         )
 
+    def _ydotool_type_ascii_enabled(self) -> bool:
+        """Whether VOCALINUX_YDOTOOL_TYPE_ASCII opts into per-key typing.
+
+        Off by default: ydotool's keycodes follow physical US key positions,
+        so on other layouts typing can differ from a clipboard paste. The
+        switch only affects the ydotool backend; non-ASCII text always uses
+        the clipboard.
+        """
+        return os.environ.get("VOCALINUX_YDOTOOL_TYPE_ASCII", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    @staticmethod
+    def _ascii_typeable_by_ydotool(text: str) -> bool:
+        """True for printable ASCII, the subset ydotool 0.1.x can type.
+
+        Control characters (newlines from "new line", tabs) are not in
+        ydotool's key table; its TypeText() stops at the first one it cannot
+        map, which would silently drop the rest of the text. Those go through
+        the clipboard instead.
+        """
+        return all(0x20 <= ord(character) <= 0x7E for character in text)
+
     def _inject_with_wayland_tool(self, text: str):
         """
         Inject text using a Wayland-compatible tool (wtype or ydotool).
@@ -2902,16 +2928,23 @@ class TextInjector:
         if self.wayland_tool == "ydotool":
             if not self._ensure_ydotoold():
                 logger.warning("ydotoold not ready before injection")
-            logger.info(
-                "Using clipboard paste for ydotool "
-                "(single paste chord instead of per-character typing)"
-            )
-            if self._inject_via_clipboard_paste(text):
-                return
-            logger.warning(
-                "Clipboard paste failed, falling back to ydotool type "
-                "(character-by-character; text may be scrambled on non-US layouts)"
-            )
+            # Opt-in: type plain ASCII with `ydotool type` (one keycode per
+            # character) instead of a clipboard paste. Non-ASCII text still
+            # needs the clipboard because ydotool 0.1.x drops characters it
+            # has no keycode for.
+            if self._ydotool_type_ascii_enabled() and self._ascii_typeable_by_ydotool(text):
+                logger.info("Typing ASCII text with ydotool type (VOCALINUX_YDOTOOL_TYPE_ASCII=1)")
+            else:
+                logger.info(
+                    "Using clipboard paste for ydotool "
+                    "(single paste chord instead of per-character typing)"
+                )
+                if self._inject_via_clipboard_paste(text):
+                    return
+                logger.warning(
+                    "Clipboard paste failed, falling back to ydotool type "
+                    "(character-by-character; text may be scrambled on non-US layouts)"
+                )
 
         # Type in chunks so shutdown can abort between subprocess calls — one
         # whole-string call could not be interrupted for its full
